@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Bid Debugger</title>
+  <style>
+    body {
+      background: #111;
+      color: lightgreen;
+      margin: 0;
+      padding: 10px;
+      font-family: sans-serif;
+    }
+    button {
+      background: #222;
+      border: 1px solid #444;
+      color: lightgreen;
+      margin-bottom: 10px;
+      cursor: pointer;
+      padding: 5px 10px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+    }
+    th, td {
+      border: 1px solid #444;
+      padding: 6px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #222;
+    }
+  </style>
+</head>
+<body>
+  <h2>Bid Debugger</h2>
+  <button id="clearAndRefreshBtn">Clear Data &amp; Refresh GPT</button>
+  <button id="toggleViewBtn">Switch to view by partner</button>
+  <div id="paramsTableContainer">No data available</div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

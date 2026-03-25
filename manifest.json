@@ -1,30 +1,47 @@
 {
   "manifest_version": 3,
-  "name": "Prebid mappings checker",
-  "version": "1.0",
-  "description": "Displauys slot mapping values for partners ",
-  "permissions": [
-    "storage",
-    "activeTab",
-    "scripting"
-  ],
+  "name": "IDNML Mapping Uploader",
+  "version": "1.5",
+  "description": "Extract bidder/slot mappings from pages and upload to Supabase.",
+  "permissions": ["storage", "tabs"],
   "host_permissions": [
-    "<all_urls>"
+    "*://*.independent.co.uk/*",
+    "*://*.the-independent.com/*",
+    "*://*.standard.co.uk/*",
+    "*://*.huffingtonpost.co.uk/*",
+    "*://*.buzzfeed.com/*"
   ],
   "action": {
+    "default_title": "Mapping Checker",
     "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
+      "matches": [
+        "*://*.independent.co.uk/*",
+        "*://*.the-independent.com/*",
+        "*://*.standard.co.uk/*",
+        "*://*.huffingtonpost.co.uk/*",
+        "*://*.buzzfeed.com/*"
+      ],
       "js": ["content.js"],
-      "run_at": "document_end"
+      "run_at": "document_start",
+      "all_frames": true
     }
   ],
   "web_accessible_resources": [
     {
       "resources": ["injected.js"],
-      "matches": ["<all_urls>"]
+      "matches": [
+        "*://*.independent.co.uk/*",
+        "*://*.the-independent.com/*",
+        "*://*.standard.co.uk/*",
+        "*://*.huffingtonpost.co.uk/*",
+        "*://*.buzzfeed.com/*"
+      ]
     }
   ]
 }

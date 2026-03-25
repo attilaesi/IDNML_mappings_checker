@@ -1,47 +1,54 @@
-// content.js
+// content.js – UPDATED (single-inject + strict message filtering)
 
-console.log("Attila: content.js loaded. Clearing data on page load.");
-
-chrome.storage.local.set({ bidParamsData: null });
-
-(function() {
-  console.log("Attila: Injecting injected.js into the page context.");
-  const s = document.createElement('script');
-  s.src = chrome.runtime.getURL('injected.js');
-  s.onload = () => s.remove();
-  (document.head || document.documentElement).appendChild(s);
-})();
-
-// Listen for messages from injected.js
-window.addEventListener('message', (event) => {
+// 1) Listen for messages from injected.js (page context)
+window.addEventListener("message", (event) => {
   if (event.source !== window) return;
-  if (event.data && event.data.source === 'bidParamsDebugger') {
-    // If we got slotParamsMap & partnerParamsMap
-    if (event.data.slotParamsMap && event.data.partnerParamsMap) {
-      console.log("Attila: content.js received new data from injected.js. Storing in chrome.storage.");
-      const data = {
-        slotParamsMap: event.data.slotParamsMap,
-        partnerParamsMap: event.data.partnerParamsMap
-      };
-      chrome.storage.local.set({ bidParamsData: data }, () => {
-        console.log("Attila: content.js stored bidParamsData in chrome.storage.local.");
-      });
-    }
+  if (!event.data) return;
+
+  const data = event.data;
+  let payload = null;
+
+  // Old format: { type: "BID_PARAMS_EXTRACTED", payload: {...} }
+  if (data.type === "BID_PARAMS_EXTRACTED" && data.payload) {
+    payload = data.payload;
   }
+  // New format: { source: "bidParamsDebugger", partnerParamsMap, slotParamsMap }
+  // IMPORTANT: only store when BOTH maps are present (prevents overwriting with commands/partials)
+  else if (
+    data.source === "bidParamsDebugger" &&
+    data.partnerParamsMap &&
+    data.slotParamsMap
+  ) {
+    payload = {
+      partnerParamsMap: data.partnerParamsMap,
+      slotParamsMap: data.slotParamsMap
+    };
+  }
+
+  if (!payload) return;
+
+  chrome.storage.local.set({ bidParamsData: payload }, () => {
+    console.log("[MappingChecker][content] Stored bidParamsData:", payload);
+  });
 });
 
-// Listen for the "clearAndRefresh" message from popup.js
-chrome.runtime.onMessage.addListener((req, sender, sendResp) => {
-  if (req.action === 'clearAndRefresh') {
-    console.log("Attila: content.js got 'clearAndRefresh' from popup.");
-    chrome.storage.local.set({ bidParamsData: null }, () => {
-      console.log("Attila: content.js cleared data. Posting refreshGPT to injected.js.");
-      window.postMessage({
-        source: 'bidParamsDebugger',
-        command: 'refreshGPT'
-      }, '*');
-      sendResp({ success: true });
-    });
-    return true; // indicates async response
+// 2) Inject injected.js into the page context (ONCE per frame)
+(function injectOnce() {
+  const SCRIPT_ID = "mapping-checker-injected";
+
+  // Prevent duplicate injection (SPA navigations, extension reload, etc.)
+  if (document.getElementById(SCRIPT_ID)) {
+    console.log("[MappingChecker][content] injected.js already present, skipping.");
+    return;
   }
-});
+
+  const s = document.createElement("script");
+  s.id = SCRIPT_ID;
+  s.src = chrome.runtime.getURL("injected.js");
+  (document.head || document.documentElement).appendChild(s);
+
+  // Keep script element for the ID guard
+  s.onload = () => {
+    console.log("[MappingChecker][content] injected.js injected.");
+  };
+})();

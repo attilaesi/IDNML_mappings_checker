@@ -1,175 +1,279 @@
-// injected.js
+// injected.js – accumulate bidder/slot mappings (queue-safe, uses bidRequested)
+// Output format stored as a SINGLE LINE string using literal "\n" separators:
+// "slot\\nkey: val\\nkey2: val\\nmediatypes: banner, video(outstream)"
 
-(function() {
-  let prevSlotMap = {};
-  let prevPartnerMap = {};
+(function () {
+  console.log("[MappingChecker][injected] Loaded, waiting for pbjs…");
 
-  console.log("Attila: injected.js loaded, waiting for pbjs & googletag.");
+  let accumulatedPartnerMap = {}; // bidder -> Set of entry strings
+  let accumulatedSlotMap = {};    // slot   -> Set of entry strings
 
-  // 1) Wait for pbjs + GPT
-  function waitForPbjsAndGpt() {
-    if (
-      !window.pbjs ||
-      typeof pbjs.getEvents !== 'function' ||
-      !window.googletag ||
-      !googletag.pubads
-    ) {
-      console.log("Attila: pbjs/googletag not ready, retry in 500ms.");
-      setTimeout(waitForPbjsAndGpt, 500);
-      return;
+  let backfillIntervalId = null;
+
+  const EXCLUDE_KEYS = [
+    "keywords",
+    "customData",
+    "video",
+    "dctr",
+    "wiid",
+    "floor",
+    "floorPrice",
+    "pageviewId"
+  ];
+
+  // IMPORTANT: store literal "\n" (two chars) so DB/JSON layers don't eat formatting
+  const NL = "\\n";
+
+  function normalizeValue(v) {
+    if (v === null || v === undefined) return "";
+    if (typeof v === "number" || typeof v === "boolean") return String(v);
+
+    if (typeof v === "string") {
+      const s = v.trim();
+      if (
+        (s.startsWith('"') && s.endsWith('"')) ||
+        (s.startsWith("'") && s.endsWith("'"))
+      ) {
+        return s.slice(1, -1);
+      }
+      return s;
     }
-    console.log("Attila: pbjs & googletag are ready. Setting up event listeners.");
-    setupEvents();
+
+    try {
+      return JSON.stringify(v);
+    } catch (e) {
+      return "[unserializable]";
+    }
   }
 
-  // 2) Setup GPT event + handle refreshGPT command
-  function setupEvents() {
-    // Hook GPT's slotResponseReceived to gather data whenever GPT responds
-    googletag.pubads().addEventListener('slotResponseReceived', (event) => {
-      const slotId = event.slot.getSlotElementId();
-      console.log(`Attila: slotResponseReceived for slotElementId="${slotId}". Collecting data now.`);
-      collectPrebidData();
+  function sanitizeLine(line) {
+    // Ensure we never accidentally embed real newlines into a "line"
+    // (which would make the output inconsistent)
+    return String(line).replace(/\r?\n/g, " ");
+  }
+
+  function formatParamsLines(params) {
+    if (!params || typeof params !== "object") return [];
+
+    const keys = Object.keys(params).sort();
+    const lines = [];
+
+    keys.forEach((key) => {
+      if (EXCLUDE_KEYS.includes(key)) return;
+      const val = normalizeValue(params[key]);
+      lines.push(`${sanitizeLine(key)}: ${sanitizeLine(val)}`);
     });
 
-    // Also collect data in case some slots responded before we hooked in
-    collectPrebidData();
+    return lines;
+  }
 
-    // Listen for "refreshGPT" from content.js
-    window.addEventListener('message', (evt) => {
-      if (evt.source !== window) return;
-      if (!evt.data || evt.data.source !== 'bidParamsDebugger') return;
+  function inferVideoKind(videoObj) {
+    if (!videoObj || typeof videoObj !== "object") return null;
 
-      if (evt.data.command === 'refreshGPT') {
-        console.log("Attila: 'refreshGPT' command received. Will request new Prebid bids, then refresh GPT.");
-        handleRefresh();
+    const ctx = typeof videoObj.context === "string" ? videoObj.context.toLowerCase() : "";
+    if (ctx.includes("instream")) return "instream";
+    if (ctx.includes("outstream")) return "outstream";
+
+    const plcmt = videoObj.plcmt;
+    if (plcmt === 1) return "instream";
+    if (typeof plcmt === "number") return "outstream";
+
+    const placement = typeof videoObj.placement === "string" ? videoObj.placement.toLowerCase() : "";
+    if (placement.includes("instream")) return "instream";
+    if (placement.includes("outstream")) return "outstream";
+
+    return null;
+  }
+
+  function summarizeMediaTypes(bid, bidderRequest) {
+    const mt = (bid && bid.mediaTypes) || (bidderRequest && bidderRequest.mediaTypes) || null;
+    const legacy = (bid && bid.mediaType) ? String(bid.mediaType).toLowerCase() : null;
+
+    const parts = [];
+
+    if (mt && typeof mt === "object") {
+      if (mt.banner) parts.push("banner");
+
+      if (mt.video) {
+        const kind = inferVideoKind(mt.video);
+        parts.push(kind ? `video(${kind})` : "video");
+      }
+    } else if (legacy) {
+      if (legacy === "banner") parts.push("banner");
+      else if (legacy === "video") parts.push("video");
+      else parts.push(legacy);
+    }
+
+    if (!parts.length) return "mediatypes: unknown";
+
+    return `mediatypes: ${[...new Set(parts)].join(", ")}`;
+  }
+
+  function joinLines(lines) {
+    return lines.map(sanitizeLine).join(NL);
+  }
+
+  function addEntry(bidder, adUnitCode, paramsObj, mediaTypesLine) {
+    const bidderName = sanitizeLine(bidder || "(unknown)");
+    const slotName = sanitizeLine(adUnitCode || "(unknown_adunit)");
+
+    const paramLines = formatParamsLines(paramsObj);
+
+    // Partner map entry: first line is slot
+    const entry = joinLines([slotName, ...paramLines, sanitizeLine(mediaTypesLine)]);
+
+    if (!accumulatedPartnerMap[bidderName]) accumulatedPartnerMap[bidderName] = new Set();
+    accumulatedPartnerMap[bidderName].add(entry);
+
+    // Slot map entry: first line is bidder
+    const slotEntry = joinLines([bidderName, ...paramLines, sanitizeLine(mediaTypesLine)]);
+
+    if (!accumulatedSlotMap[slotName]) accumulatedSlotMap[slotName] = new Set();
+    accumulatedSlotMap[slotName].add(slotEntry);
+  }
+
+  function postAccumulatedMaps() {
+    const partnerMapArr = {};
+    for (const k of Object.keys(accumulatedPartnerMap)) {
+      partnerMapArr[k] = [...accumulatedPartnerMap[k]];
+    }
+    const slotMapArr = {};
+    for (const k of Object.keys(accumulatedSlotMap)) {
+      slotMapArr[k] = [...accumulatedSlotMap[k]];
+    }
+    window.postMessage(
+      {
+        source: "bidParamsDebugger",
+        slotParamsMap: slotMapArr,
+        partnerParamsMap: partnerMapArr
+      },
+      "*"
+    );
+  }
+
+  function handleBidRequested(bidderRequest) {
+    try {
+      const bidder =
+        bidderRequest.bidderCode ||
+        bidderRequest.bidder ||
+        bidderRequest.bidderName ||
+        "(unknown)";
+
+      const bids = Array.isArray(bidderRequest.bids) ? bidderRequest.bids : [];
+      bids.forEach((bid) => {
+        const adUnitCode =
+          bid.adUnitCode ||
+          bid.adUnit ||
+          bid.placementCode ||
+          "(unknown_adunit)";
+
+        const paramsObj = bid.params || {};
+        const mediaTypesLine = summarizeMediaTypes(bid, bidderRequest);
+
+        addEntry(bidder, adUnitCode, paramsObj, mediaTypesLine);
+      });
+
+      postAccumulatedMaps();
+    } catch (e) {
+      console.warn("[MappingChecker][injected] handleBidRequested failed:", e);
+    }
+  }
+
+  function backfillFromGetBidRequests() {
+    if (!window.pbjs || typeof pbjs.getBidRequests !== "function") return false;
+
+    try {
+      const reqs = pbjs.getBidRequests();
+      if (!Array.isArray(reqs)) return false;
+
+      reqs.forEach((br) => {
+        if (br && (br.bids || br.bidderCode)) {
+          handleBidRequested(br);
+        }
+      });
+
+      return true;
+    } catch (e) {
+      console.warn("[MappingChecker][injected] backfillFromGetBidRequests failed:", e);
+      return false;
+    }
+  }
+
+  function whenPrebidReady(cb) {
+    if (!window.pbjs || !pbjs.que || !Array.isArray(pbjs.que)) return false;
+
+    pbjs.que.push(function () {
+      try {
+        cb();
+      } catch (e) {
+        console.warn("[MappingChecker][injected] Prebid-ready callback failed:", e);
       }
     });
+
+    return true;
   }
 
-  // 3) Request new Prebid bids, then refresh GPT
-  function handleRefresh() {
-    if (window.pbjs?.requestBids && window.googletag?.pubads) {
-      const slots = googletag.pubads().getSlots();
-      if (!slots.length) {
-        console.log("Attila: No GPT slots found to refresh.");
+  function setupHooksWhenReady() {
+    let attempts = 0;
+    const maxAttempts = 240;
+
+    const interval = setInterval(() => {
+      attempts++;
+
+      const ok = whenPrebidReady(() => {
+        console.log("[MappingChecker][injected] Prebid queue confirmed → attaching hooks");
+
+        if (typeof pbjs.onEvent === "function") {
+          try {
+            pbjs.onEvent("bidRequested", handleBidRequested);
+            pbjs.onEvent("auctionEnd", postAccumulatedMaps);
+            console.log("[MappingChecker][injected] Hooks attached: bidRequested + auctionEnd");
+          } catch (e) {
+            console.warn("[MappingChecker][injected] pbjs.onEvent attach failed:", e);
+          }
+        } else {
+          console.warn("[MappingChecker][injected] pbjs.onEvent not available; relying on backfill/polling.");
+        }
+
+        backfillFromGetBidRequests();
+
+        backfillIntervalId = setInterval(() => {
+          backfillFromGetBidRequests();
+        }, 5000);
+
+        postAccumulatedMaps();
+      });
+
+      if (ok) {
+        clearInterval(interval);
         return;
       }
 
-      const adUnitCodes = slots.map(slot => slot.getAdUnitPath());
-      console.log("Attila: handleRefresh -> requesting new bids for adUnitCodes:", adUnitCodes);
-
-      pbjs.requestBids({
-        adUnitCodes,
-        bidsBackHandler: () => {
-          console.log("Attila: Prebid bids returned, now calling googletag.pubads().refresh()");
-          googletag.pubads().refresh(slots);
-        }
-      });
-    } else {
-      console.log("Attila: pbjs.requestBids or googletag not available. Can't refresh GPT.");
-    }
-  }
-
-  // 4) Collect data from Prebid events & post to content.js
-  function collectPrebidData() {
-    console.log("Attila: collectPrebidData() called, building slot & partner maps.");
-    const events = pbjs.getEvents();
-    const bidRequestedEvents = events.filter(e => e.eventType === 'bidRequested');
-
-    const slotMap = {};
-
-    // We'll store partner data in nested objects for dedup
-    // partnerMap[bid.bidder] = { [adUnitCode]: "formatted string" }
-    const partnerMapObj = {};
-
-    // *** Keys to exclude ***
-    const EXCLUDE_KEYS = ['keywords', 'customData', 'video', 'dctr', 'wiid', 'floor', 'floorPrice','pageviewId'];
-
-    bidRequestedEvents.forEach(event => {
-      if (event.args && Array.isArray(event.args.bids)) {
-        event.args.bids.forEach(bid => {
-          if (bid && bid.params && bid.adUnitCode && bid.bidder) {
-            // Filter out unwanted keys
-            const paramString = Object.entries(bid.params)
-              .filter(([key]) => !EXCLUDE_KEYS.includes(key))
-              .map(([key, val]) => `${key}: ${val}`)
-              .join('<br>&nbsp;&nbsp;&nbsp;&nbsp;');
-            // Build mediaTypes string if present
-            let mediaTypesString = '';
-            try {
-              const mt = bid && bid.mediaTypes ? bid.mediaTypes : (event && event.args && event.args.mediaTypes ? event.args.mediaTypes : null);
-              if (mt && typeof mt === 'object') {
-                const parts = [];
-                if (mt.banner) parts.push('banner');
-                if (mt.video) {
-                  let label = 'video';
-                  try {
-                    const ctx = mt.video.context || mt.video.playerParams && mt.video.playerParams.context;
-                    if (ctx) label += `(${ctx})`;
-                  } catch (_) {}
-                  parts.push(label);
-                }
-                if (mt.native) parts.push('native');
-                if (parts.length) {
-                  mediaTypesString = `<br>&nbsp;&nbsp;&nbsp;&nbsp;mediatypes: ${parts.join(', ')}`;
-                }
-              }
-            } catch (e) {
-              // keep silent to avoid breaking existing features
-            }
-
-
-            // --- BY SLOT (no dedup) ---
-            if (!slotMap[bid.adUnitCode]) {
-              slotMap[bid.adUnitCode] = [];
-            }
-            slotMap[bid.adUnitCode].push(
-              `<span style="color: yellow;">${bid.bidder}</span><br>&nbsp;&nbsp;&nbsp;&nbsp;${paramString}${mediaTypesString}`
-            );
-
-            // --- BY PARTNER (DEDUP) ---
-            if (!partnerMapObj[bid.bidder]) {
-              partnerMapObj[bid.bidder] = {};
-            }
-            // Overwrite or unify, but here we overwrite for dedup
-            partnerMapObj[bid.bidder][bid.adUnitCode] =
-              `<span style="color: yellow;">${bid.adUnitCode}</span><br>&nbsp;&nbsp;&nbsp;&nbsp;${paramString}${mediaTypesString}`;
-          }
-        });
+      if (attempts >= maxAttempts) {
+        clearInterval(interval);
+        console.warn("[MappingChecker][injected] Gave up waiting for pbjs after", attempts, "attempts.");
       }
-    });
+    }, 500);
+  }
 
-    // Convert partnerMapObj from { [bidder]: { [slot]: "string" } } to arrays
-    const partnerMap = {};
-    Object.keys(partnerMapObj).forEach(bidder => {
-      partnerMap[bidder] = Object.values(partnerMapObj[bidder]);
-    });
+  window.addEventListener("message", (evt) => {
+    if (evt.source !== window) return;
+    if (!evt.data || evt.data.source !== "bidParamsDebugger") return;
 
-    // Compare new vs old to see if truly new data
-    const isSameData =
-      isEqual(slotMap, prevSlotMap) &&
-      isEqual(partnerMap, prevPartnerMap);
-
-    if (isSameData) {
-      console.log("Attila: No new data found, skipping postMessage.");
-      return;
+    if (evt.data.command === "refreshGPT") {
+      accumulatedPartnerMap = {};
+      accumulatedSlotMap = {};
+      backfillFromGetBidRequests();
+      postAccumulatedMaps();
     }
+  });
 
-    prevSlotMap = slotMap;
-    prevPartnerMap = partnerMap;
+  window.addEventListener("beforeunload", () => {
+    if (backfillIntervalId !== null) {
+      clearInterval(backfillIntervalId);
+      backfillIntervalId = null;
+    }
+  });
 
-    console.log("Attila: Found new data, posting to content.js (slotMap & partnerMap).");
-    window.postMessage({
-      source: 'bidParamsDebugger',
-      slotParamsMap: slotMap,
-      partnerParamsMap: partnerMap
-    }, '*');
-  }
-
-  // Simple deep compare (just for demo)
-  function isEqual(obj1, obj2) {
-    return JSON.stringify(obj1) === JSON.stringify(obj2);
-  }
-
-  waitForPbjsAndGpt();
+  setupHooksWhenReady();
 })();

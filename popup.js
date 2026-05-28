@@ -310,7 +310,7 @@ function checkExistsInDB() {
     setBadge(badge, "Checking DB…", "#444", "#ccc");
 
     try {
-      const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/check_profile_exists`, {
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_profile_bidders`, {
         method: "POST",
         headers: {
           apikey: SUPABASE_ANON_KEY,
@@ -331,12 +331,24 @@ function checkExistsInDB() {
         return;
       }
 
-      const exists = await res.json();
-      if (exists) {
-        setBadge(badge, "\u2713 Already in DB", "#1a5c1a", "#aeffae");
-      } else {
+      const dbBidders = await res.json();
+
+      if (!Array.isArray(dbBidders) || dbBidders.length === 0) {
         setBadge(badge, "\u2717 Not yet uploaded", "#5c3a00", "#ffd580");
+        return;
       }
+
+      chrome.storage.local.get("bidParamsData", (stored) => {
+        const currentBidders = Object.keys(
+          (stored.bidParamsData && stored.bidParamsData.partnerParamsMap) || {}
+        );
+        const newBidders = currentBidders.filter((b) => !dbBidders.includes(b));
+        if (newBidders.length === 0) {
+          setBadge(badge, "\u2713 Up to date (" + dbBidders.length + " bidders)", "#1a5c1a", "#aeffae");
+        } else {
+          setBadge(badge, "\u26a0 New bidders: " + newBidders.join(", "), "#5c3a00", "#ffd580");
+        }
+      });
     } catch (err) {
       console.warn("[checkExistsInDB] error:", err);
       setBadge(badge, "DB check error", "#7a0000", "#fcc");

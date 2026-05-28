@@ -60,6 +60,12 @@ function injectControls() {
   btn.style.marginTop = "4px";
   btn.onclick = onUploadToSupabase;
   container.appendChild(btn);
+
+  const removeBtn = document.createElement("button");
+  removeBtn.id = "removeBtn";
+  removeBtn.textContent = "Remove dropped bidders from DB";
+  removeBtn.style.cssText = "margin-top:4px;display:none;background:#7a0000;color:#fff;border:none;padding:5px 10px;border-radius:4px;cursor:pointer;width:100%;";
+  container.appendChild(removeBtn);
 }
 
 function makeDropdown(id, label, options) {
@@ -342,11 +348,28 @@ function checkExistsInDB() {
         const currentBidders = Object.keys(
           (stored.bidParamsData && stored.bidParamsData.partnerParamsMap) || {}
         );
-        const newBidders = currentBidders.filter((b) => !dbBidders.includes(b));
-        if (newBidders.length === 0) {
+        const newBidders     = currentBidders.filter((b) => !dbBidders.includes(b));
+        const removedBidders = dbBidders.filter((b) => !currentBidders.includes(b));
+        const removeBtn      = document.getElementById("removeBtn");
+
+        if (newBidders.length === 0 && removedBidders.length === 0) {
           setBadge(badge, "\u2713 Up to date (" + dbBidders.length + " bidders)", "#1a5c1a", "#aeffae");
+          if (removeBtn) removeBtn.style.display = "none";
         } else {
-          setBadge(badge, "\u26a0 New bidders: " + newBidders.join(", "), "#5c3a00", "#ffd580");
+          const parts = [];
+          if (newBidders.length > 0)     parts.push("\u26a0 New: " + newBidders.join(", "));
+          if (removedBidders.length > 0) parts.push("\u2193 Removed: " + removedBidders.join(", "));
+          const bg = removedBidders.length > 0 && newBidders.length === 0 ? "#4a0a0a" : "#5c3a00";
+          setBadge(badge, parts.join(" \u2014 "), bg, "#ffd580");
+
+          if (removeBtn && removedBidders.length > 0) {
+            removeBtn.style.display = "block";
+            removeBtn.onclick = () => removeFromDB({
+              removedBidders, publication, env, geo, device, pageType
+            });
+          } else if (removeBtn) {
+            removeBtn.style.display = "none";
+          }
         }
       });
     } catch (err) {
@@ -354,6 +377,43 @@ function checkExistsInDB() {
       setBadge(badge, "DB check error", "#7a0000", "#fcc");
     }
   });
+}
+
+async function removeFromDB({ removedBidders, publication, env, geo, device, pageType }) {
+  const confirmed = confirm(
+    "Remove " + removedBidders.length + " bidder(s) from DB for this profile?\n\n" +
+    removedBidders.join(", ")
+  );
+  if (!confirmed) return;
+
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/remove_profile_bidders`, {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        p_publisher_code: publication,
+        p_env_code:       env,
+        p_geo_code:       geo,
+        p_device_code:    device,
+        p_page_type_code: pageType,
+        p_bidder_codes:   removedBidders,
+      }),
+    });
+
+    if (res.ok) {
+      alert("Removed successfully.");
+      checkExistsInDB();
+    } else {
+      const text = await res.text();
+      alert("Remove failed:\n\n" + text);
+    }
+  } catch (err) {
+    alert("Remove error:\n\n" + err.message);
+  }
 }
 
 function setBadge(el, text, bg, color) {

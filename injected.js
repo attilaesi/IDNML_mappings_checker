@@ -173,10 +173,10 @@
         }
       } else if (attempts >= maxAttempts) {
         clearInterval(interval);
-        console.warn(
-          "[MappingChecker][injected] Gave up waiting for pbjs after",
+        console.log(
+          "[MappingChecker][injected] pbjs not found on this page after",
           attempts,
-          "attempts."
+          "attempts — no auction detected."
         );
       }
     }, 500);

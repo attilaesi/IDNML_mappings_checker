@@ -10,12 +10,8 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     return;
   }
 
-  try {
-    chrome.scripting.executeScript({
-      target: { tabId },
-      files: ["injected.js"]
-    });
-  } catch (e) {
-    console.warn("Injection blocked:", e);
-  }
+  chrome.scripting.executeScript({
+    target: { tabId },
+    files: ["injected.js"]
+  }).catch(() => {});
 });

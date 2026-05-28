@@ -333,9 +333,9 @@ function checkExistsInDB() {
 
       const exists = await res.json();
       if (exists) {
-        setBadge(badge, "✓ Already in DB", "#1a5c1a", "#aeffae");
+        setBadge(badge, "\u2713 Already in DB", "#1a5c1a", "#aeffae");
       } else {
-        setBadge(badge, "✗ Not yet uploaded", "#5c3a00", "#ffd580");
+        setBadge(badge, "\u2717 Not yet uploaded", "#5c3a00", "#ffd580");
       }
     } catch (err) {
       console.warn("[checkExistsInDB] error:", err);

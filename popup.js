@@ -12,6 +12,7 @@
 document.addEventListener("DOMContentLoaded", () => {
   console.log("Popup loaded.");
   injectControls();
+  checkExistsInDB();
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && changes.bidParamsData) buildTable();
@@ -43,9 +44,20 @@ function injectControls() {
 
   container.appendChild(makeDropdown("deviceSelect", "Device", ["desktop", "mobile"]));
 
+  ["pageTypeSelect", "geoSelect", "deviceSelect"].forEach((id) => {
+    document.getElementById(id).onchange = checkExistsInDB;
+  });
+
+  const badge = document.createElement("div");
+  badge.id = "dbStatus";
+  badge.style.cssText =
+    "margin:8px 0;padding:5px 10px;border-radius:4px;font-size:12px;text-align:center;background:#444;color:#ccc;";
+  badge.textContent = "Checking DB…";
+  container.appendChild(badge);
+
   const btn = document.createElement("button");
   btn.textContent = "Upload Table to Supabase";
-  btn.style.marginTop = "10px";
+  btn.style.marginTop = "4px";
   btn.onclick = onUploadToSupabase;
   container.appendChild(btn);
 }
@@ -269,6 +281,73 @@ async function uploadToSupabaseRPC(payload) {
     alert("Upload exception:\n\n" + err.message);
     return false;
   }
+}
+
+/* ------------------------------
+   DB EXISTENCE CHECK
+--------------------------------*/
+function checkExistsInDB() {
+  const badge = document.getElementById("dbStatus");
+  if (!badge) return;
+
+  chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
+    const pageUrl = tabs?.[0]?.url;
+    if (!pageUrl) {
+      setBadge(badge, "—", "#555", "#aaa");
+      return;
+    }
+
+    const { publication, env } = derivePublicationAndEnv(pageUrl);
+    if (publication === "unknown" || env === "unknown") {
+      setBadge(badge, "Unknown page — no check", "#555", "#aaa");
+      return;
+    }
+
+    const pageType = document.getElementById("pageTypeSelect").value;
+    const geo = document.getElementById("geoSelect").value;
+    const device = document.getElementById("deviceSelect").value;
+
+    setBadge(badge, "Checking DB…", "#444", "#ccc");
+
+    try {
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/check_profile_exists`, {
+        method: "POST",
+        headers: {
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          p_publisher_code: publication,
+          p_env_code: env,
+          p_geo_code: geo,
+          p_device_code: device,
+          p_page_type_code: pageType,
+        }),
+      });
+
+      if (!res.ok) {
+        setBadge(badge, "DB check failed", "#7a0000", "#fcc");
+        return;
+      }
+
+      const exists = await res.json();
+      if (exists) {
+        setBadge(badge, "✓ Already in DB", "#1a5c1a", "#aeffae");
+      } else {
+        setBadge(badge, "✗ Not yet uploaded", "#5c3a00", "#ffd580");
+      }
+    } catch (err) {
+      console.warn("[checkExistsInDB] error:", err);
+      setBadge(badge, "DB check error", "#7a0000", "#fcc");
+    }
+  });
+}
+
+function setBadge(el, text, bg, color) {
+  el.textContent = text;
+  el.style.background = bg;
+  el.style.color = color;
 }
 
 /* ------------------------------

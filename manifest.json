@@ -3,14 +3,8 @@
   "name": "IDNML Mapping Uploader",
   "version": "1.5",
   "description": "Extract bidder/slot mappings from pages and upload to Supabase.",
-  "permissions": ["storage", "tabs"],
-  "host_permissions": [
-    "*://*.independent.co.uk/*",
-    "*://*.the-independent.com/*",
-    "*://*.standard.co.uk/*",
-    "*://*.huffingtonpost.co.uk/*",
-    "*://*.buzzfeed.com/*"
-  ],
+  "permissions": ["storage", "tabs", "scripting"],
+  "host_permissions": ["<all_urls>"],
   "action": {
     "default_title": "Mapping Checker",
     "default_popup": "popup.html"
@@ -20,28 +14,15 @@
   },
   "content_scripts": [
     {
-      "matches": [
-        "*://*.independent.co.uk/*",
-        "*://*.the-independent.com/*",
-        "*://*.standard.co.uk/*",
-        "*://*.huffingtonpost.co.uk/*",
-        "*://*.buzzfeed.com/*"
-      ],
+      "matches": ["<all_urls>"],
       "js": ["content.js"],
-      "run_at": "document_start",
-      "all_frames": true
+      "run_at": "document_start"
     }
   ],
   "web_accessible_resources": [
     {
       "resources": ["injected.js"],
-      "matches": [
-        "*://*.independent.co.uk/*",
-        "*://*.the-independent.com/*",
-        "*://*.standard.co.uk/*",
-        "*://*.huffingtonpost.co.uk/*",
-        "*://*.buzzfeed.com/*"
-      ]
+      "matches": ["<all_urls>"]
     }
   ]
 }

@@ -44,7 +44,6 @@ function injectControls() {
   container.appendChild(makeDropdown("deviceSelect", "Device", ["desktop", "mobile"]));
 
   const btn = document.createElement("button");
-  btn.id = "uploadBtn";
   btn.textContent = "Upload Table to Supabase";
   btn.style.marginTop = "10px";
   btn.onclick = onUploadToSupabase;
@@ -87,12 +86,9 @@ function buildTable() {
       return;
     }
 
-    // Replace literal "\n" (stored by injected.js) with real newlines for display
-    const displayJson = JSON.stringify(data.partnerParamsMap, null, 2)
-      .replace(/\\\\n/g, "\n");
     container.innerHTML =
       "<pre style='font-size:12px;white-space:pre-wrap;'>" +
-      displayJson +
+      JSON.stringify(data.partnerParamsMap, null, 2) +
       "</pre>";
   });
 }
@@ -183,22 +179,13 @@ function buildPayload({
         .replace(/<\/?span[^>]*>/gi, "")
         .replace(/&nbsp;/gi, " ");
 
-      // 2) Split into logical lines.
-      // Primary: injected.js stores literal "\n" (backslash + n, two chars)
+      // 2) Split by <br> tags into logical lines
       let segments = cleaned
-        .split("\\n")
+        .split(/<br\s*\/?>/i)
         .map((s) => s.trim())
         .filter((s) => s.length > 0);
 
-      // Fallback: <br> tags (legacy format)
-      if (!segments.length) {
-        segments = cleaned
-          .split(/<br\s*\/?>/i)
-          .map((s) => s.trim())
-          .filter((s) => s.length > 0);
-      }
-
-      // Final fallback: real newlines
+      // Fallback: if no <br>, try newline split
       if (!segments.length) {
         segments = cleaned
           .split("\n")
@@ -255,61 +242,40 @@ const SUPABASE_ANON_KEY =
 --------------------------------*/
 async function uploadToSupabaseRPC(payload) {
   const url = `${SUPABASE_URL}/rest/v1/rpc/ingest_mapping_rows`;
-  const MAX_RETRIES = 2;
 
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: {
-          apikey: SUPABASE_ANON_KEY,
-          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ payload }),
-      });
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ payload }),
+    });
 
-      const text = await res.text();
+    const text = await res.text();
 
-      if (!res.ok) {
-        if (attempt < MAX_RETRIES) {
-          console.warn(`Supabase upload attempt ${attempt + 1} failed (${res.status}), retrying…`);
-          await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
-          continue;
-        }
-        console.error("Supabase upload failed:", res.status, text);
-        alert("Upload failed:\n\n" + text);
-        return false;
-      }
-
-      console.log("Supabase upload success:", text);
-      return true;
-    } catch (err) {
-      if (attempt < MAX_RETRIES) {
-        console.warn(`Supabase upload attempt ${attempt + 1} threw, retrying…`, err);
-        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
-        continue;
-      }
-      console.error("Supabase upload exception:", err);
-      alert("Upload exception:\n\n" + err.message);
+    if (!res.ok) {
+      console.error("Supabase upload failed:", res.status, text);
+      alert("Upload failed:\n\n" + text);
       return false;
     }
+
+    console.log("Supabase upload success:", text);
+    return true;
+  } catch (err) {
+    console.error("Supabase upload exception:", err);
+    alert("Upload exception:\n\n" + err.message);
+    return false;
   }
-  return false;
 }
 
 /* ------------------------------
    UPLOAD HANDLER
 --------------------------------*/
-async function onUploadToSupabase() {
-  const btn = document.getElementById("uploadBtn");
-  btn.disabled = true;
-  btn.textContent = "Uploading…";
-
-  try {
-    const tabs = await new Promise((resolve) =>
-      chrome.tabs.query({ active: true, currentWindow: true }, resolve)
-    );
+function onUploadToSupabase() {
+  chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
     const pageUrl = tabs?.[0]?.url;
     if (!pageUrl) {
       alert("Could not read current tab URL.");
@@ -341,34 +307,29 @@ async function onUploadToSupabase() {
     const geo = document.getElementById("geoSelect").value;
     const device = document.getElementById("deviceSelect").value;
 
-    const storageRes = await new Promise((resolve) =>
-      chrome.storage.local.get("bidParamsData", resolve)
-    );
+    chrome.storage.local.get("bidParamsData", async (res) => {
+      if (!res.bidParamsData) {
+        alert("No mapping available.");
+        return;
+      }
 
-    if (!storageRes.bidParamsData) {
-      alert("No mapping available.");
-      return;
-    }
+      const payload = buildPayload({
+        data: res.bidParamsData,
+        publication,
+        env,
+        pageUrl,
+        pageType,
+        geo,
+        device,
+      });
 
-    const payload = buildPayload({
-      data: storageRes.bidParamsData,
-      publication,
-      env,
-      pageUrl,
-      pageType,
-      geo,
-      device,
+      if (!payload.length) {
+        alert("Payload is empty (no bidder/slot rows built). Nothing to upload.");
+        return;
+      }
+
+      const ok = await uploadToSupabaseRPC(payload);
+      if (ok) alert(`Upload successful!\n\npublisher=${publication}\nenv=${env}`);
     });
-
-    if (!payload.length) {
-      alert("Payload is empty (no bidder/slot rows built). Nothing to upload.");
-      return;
-    }
-
-    const ok = await uploadToSupabaseRPC(payload);
-    if (ok) alert(`Upload successful!\n\npublisher=${publication}\nenv=${env}`);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "Upload Table to Supabase";
-  }
+  });
 }

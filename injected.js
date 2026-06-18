@@ -32,15 +32,7 @@
         if (EXCLUDE_KEYS.includes(key)) return;
         const value = params[key];
         try {
-          if (
-            typeof value === "object" &&
-            value !== null &&
-            !Array.isArray(value)
-          ) {
-            lines.push(`${key}: ${JSON.stringify(value)}`);
-          } else {
-            lines.push(`${key}: ${JSON.stringify(value)}`);
-          }
+          lines.push(`${key}: ${JSON.stringify(value)}`);
         } catch (e) {
           lines.push(`${key}: [unserializable]`);
         }
@@ -50,77 +42,61 @@
     return lines.join("<br>&nbsp;&nbsp;&nbsp;&nbsp;");
   }
 
-  function formatMediaTypes(bid) {
-    // Try mediaTypes on the config, then mediaType string on the bid
-    const mt = (bid && bid.mediaTypes) || null;
-    const single = bid && bid.mediaType;
-
-    const parts = [];
-
-    if (mt) {
-      try {
-        parts.push("mediaTypes: " + JSON.stringify(mt));
-      } catch (e) {
-        // ignore
+  function getMediaTypesString(adUnitCode) {
+    // mediaTypes live on pbjs.adUnits; produce a simple string e.g. "banner" or "banner, video(outstream)"
+    try {
+      const adUnit = Array.isArray(window.pbjs.adUnits)
+        ? window.pbjs.adUnits.find((u) => u.code === adUnitCode)
+        : null;
+      if (!adUnit || !adUnit.mediaTypes) return "";
+      const mt = adUnit.mediaTypes;
+      const parts = [];
+      if (mt.banner) parts.push("banner");
+      if (mt.video) {
+        const ctx = mt.video.context;
+        parts.push(ctx ? `video(${ctx})` : "video");
       }
+      if (mt.native) parts.push("native");
+      if (!parts.length) return "";
+      return "<br>&nbsp;&nbsp;&nbsp;&nbsp;mediatypes: " + parts.join(", ");
+    } catch (e) {
+      return "";
     }
-    if (single && !parts.length) {
-      parts.push("mediaType: " + single);
-    }
-
-    if (!parts.length) return "";
-    return "<br>&nbsp;&nbsp;&nbsp;&nbsp;" + parts.join("<br>&nbsp;&nbsp;&nbsp;&nbsp;");
   }
 
-  function updateMappings() {
-    if (!window.pbjs || typeof pbjs.getBidResponses !== "function") {
-      console.warn(
-        "[MappingChecker][injected] pbjs.getBidResponses not available yet."
-      );
-      return;
-    }
+  function processBidRequestedEvent(ev) {
+    // ev.args.bids is the array of bid objects sent out in this request batch
+    const bids = (ev && ev.args && ev.args.bids) || [];
 
-    const responses = pbjs.getBidResponses() || {};
-    console.log("[MappingChecker][injected] getBidResponses()", responses);
+    bids.forEach((bid) => {
+      const adUnitCode = bid.adUnitCode;
+      const bidder     = bid.bidder || bid.bidderCode;
+      if (!adUnitCode || !bidder) return;
 
-    Object.keys(responses).forEach((adUnitCode) => {
-      const bids = (responses[adUnitCode] && responses[adUnitCode].bids) || [];
-      bids.forEach((bid) => {
-        const bidder = bid.bidder;
-        const paramsObj = bid.params || {};
+      const paramString      = formatParams(bid.params || {});
+      const mediaTypesString = getMediaTypesString(adUnitCode);
 
-        const paramString = formatParams(paramsObj);
-        const mediaTypesString = formatMediaTypes(bid);
+      const partnerEntry =
+        `<span style="color: yellow;">${adUnitCode}</span>` +
+        `<br>&nbsp;&nbsp;&nbsp;&nbsp;${paramString}${mediaTypesString}`;
 
-        // For partner view: show slot name, then params
-        const partnerEntry =
-          `<span style="color: yellow;">${adUnitCode}</span>` +
-          `<br>&nbsp;&nbsp;&nbsp;&nbsp;${paramString}${mediaTypesString}`;
+      const slotEntry =
+        `<span style="color: yellow;">${bidder}</span>` +
+        `<br>&nbsp;&nbsp;&nbsp;&nbsp;${paramString}${mediaTypesString}`;
 
-        // For slot view: show bidder name, then params
-        const slotEntry =
-          `<span style="color: yellow;">${bidder}</span>` +
-          `<br>&nbsp;&nbsp;&nbsp;&nbsp;${paramString}${mediaTypesString}`;
+      if (!accumulatedPartnerMap[bidder]) accumulatedPartnerMap[bidder] = [];
+      if (!accumulatedPartnerMap[bidder].includes(partnerEntry)) {
+        accumulatedPartnerMap[bidder].push(partnerEntry);
+      }
 
-        // ---- accumulate per bidder ----
-        if (!accumulatedPartnerMap[bidder]) {
-          accumulatedPartnerMap[bidder] = [];
-        }
-        if (!accumulatedPartnerMap[bidder].includes(partnerEntry)) {
-          accumulatedPartnerMap[bidder].push(partnerEntry);
-        }
-
-        // ---- accumulate per slot ----
-        if (!accumulatedSlotMap[adUnitCode]) {
-          accumulatedSlotMap[adUnitCode] = [];
-        }
-        if (!accumulatedSlotMap[adUnitCode].includes(slotEntry)) {
-          accumulatedSlotMap[adUnitCode].push(slotEntry);
-        }
-      });
+      if (!accumulatedSlotMap[adUnitCode]) accumulatedSlotMap[adUnitCode] = [];
+      if (!accumulatedSlotMap[adUnitCode].includes(slotEntry)) {
+        accumulatedSlotMap[adUnitCode].push(slotEntry);
+      }
     });
+  }
 
-    // Push the accumulated maps to the content script
+  function postMaps() {
     window.postMessage(
       {
         source: "bidParamsDebugger",
@@ -129,7 +105,6 @@
       },
       "*"
     );
-
     console.log(
       "[MappingChecker][injected] Posted accumulated maps to content.js",
       accumulatedPartnerMap,
@@ -143,34 +118,24 @@
     const interval = setInterval(() => {
       attempts += 1;
 
-      if (window.pbjs && typeof pbjs.getBidResponses === "function") {
+      if (window.pbjs && typeof pbjs.onEvent === "function") {
         clearInterval(interval);
         console.log("[MappingChecker][injected] pbjs ready, setting up hooks.");
 
-        // Initial snapshot
-        updateMappings();
-
-        // If pbjs.onEvent exists, hook into it
-        if (typeof pbjs.onEvent === "function") {
-          try {
-            pbjs.onEvent("bidResponse", updateMappings);
-            pbjs.onEvent("auctionEnd", updateMappings);
-            console.log(
-              "[MappingChecker][injected] Registered pbjs bidResponse/auctionEnd hooks."
-            );
-          } catch (e) {
-            console.warn(
-              "[MappingChecker][injected] Error attaching pbjs events:",
-              e
-            );
-          }
-        } else {
-          // Fallback: poll every few seconds
-          setInterval(updateMappings, 5000);
-          console.log(
-            "[MappingChecker][injected] pbjs.onEvent missing – using polling."
-          );
+        // Replay any bidRequested events that fired before this script loaded
+        if (typeof pbjs.getEvents === "function") {
+          pbjs.getEvents()
+            .filter((ev) => ev.eventType === "bidRequested")
+            .forEach(processBidRequestedEvent);
+          postMaps();
         }
+
+        // Hook future bidRequested events (covers click-to-play video auctions)
+        pbjs.onEvent("bidRequested", (args) => {
+          processBidRequestedEvent({ args });
+          postMaps();
+        });
+
       } else if (attempts >= maxAttempts) {
         clearInterval(interval);
         console.log(
@@ -182,7 +147,7 @@
     }, 500);
   }
 
-  // Optional: reset + refresh on command from popup (via content.js)
+  // Reset + refresh on command from popup (via content.js)
   window.addEventListener("message", (evt) => {
     if (evt.source !== window) return;
     if (!evt.data || evt.data.source !== "bidParamsDebugger") return;
@@ -193,7 +158,12 @@
       );
       accumulatedPartnerMap = {};
       accumulatedSlotMap = {};
-      updateMappings();
+      if (window.pbjs && typeof pbjs.getEvents === "function") {
+        pbjs.getEvents()
+          .filter((ev) => ev.eventType === "bidRequested")
+          .forEach(processBidRequestedEvent);
+        postMaps();
+      }
     }
   });
 

@@ -12,7 +12,7 @@
 document.addEventListener("DOMContentLoaded", () => {
   console.log("Popup loaded.");
   injectControls();
-  checkExistsInDB();
+  autoDetectGeoAndDevice(); // reads Locale + is_mobile_or_tablet cookies from the active tab
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && changes.bidParamsData) buildTable();
@@ -20,6 +20,54 @@ document.addEventListener("DOMContentLoaded", () => {
 
   buildTable();
 });
+
+/* ------------------------------
+   AUTO-DETECT GEO + DEVICE
+   Reads Locale cookie  → uk / us (default uk)
+   Reads is_mobile_or_tablet cookie → mobile / desktop (default desktop)
+--------------------------------*/
+async function autoDetectGeoAndDevice() {
+  try {
+    const tabs = await new Promise((res) =>
+      chrome.tabs.query({ active: true, currentWindow: true }, res)
+    );
+    const tabId = tabs?.[0]?.id;
+    if (!tabId) { checkExistsInDB(); return; }
+
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const parts = document.cookie ? document.cookie.split(/;\s*/) : [];
+        let locale = null, isMobile = null;
+        for (const c of parts) {
+          const eq = c.indexOf("=");
+          if (eq === -1) continue;
+          const name = c.slice(0, eq).trim();
+          const val  = c.slice(eq + 1).trim();
+          if (name === "Locale")              locale   = val;
+          if (name === "is_mobile_or_tablet") isMobile = val;
+        }
+        return { locale, isMobile };
+      },
+    });
+
+    const { locale, isMobile } = result?.result || {};
+
+    const geoSel    = document.getElementById("geoSelect");
+    const deviceSel = document.getElementById("deviceSelect");
+
+    if (geoSel) {
+      geoSel.value = (locale || "").toUpperCase() === "US" ? "us" : "uk";
+    }
+    if (deviceSel) {
+      deviceSel.value = isMobile === "true" ? "mobile" : "desktop";
+    }
+  } catch (e) {
+    console.warn("autoDetectGeoAndDevice failed:", e);
+  }
+
+  checkExistsInDB();
+}
 
 /* ------------------------------
    UI CONTROLS (dropdowns + upload)
@@ -104,9 +152,45 @@ function buildTable() {
       return;
     }
 
+    // Warn if display slots are captured but hero_player is not yet present.
+    // hero_player only auctions after the user clicks play on click-to-play pages.
+    const pageTypeSel = document.getElementById("pageTypeSelect");
+    const pageType    = pageTypeSel ? pageTypeSel.value : "";
+    const slotMap     = data.slotParamsMap || {};
+    const hasHeroPlayer = "hero_player" in slotMap;
+    let notice = "";
+    if ((pageType === "video_article" || pageType === "blog_article") && !hasHeroPlayer) {
+      notice =
+        "<div style='background:#5c3a00;color:#ffd580;padding:6px 10px;" +
+        "border-radius:4px;font-size:12px;margin-bottom:6px;'>" +
+        "⚠ Video slot (hero_player) not yet captured — click play to trigger the video auction, then upload." +
+        "</div>";
+    }
+
+    // Render without JSON.stringify on the outer map — values are already
+    // HTML strings containing " characters that would get double-escaped.
+    const partnerMap = data.partnerParamsMap;
+    const bidders = Object.keys(partnerMap).sort();
+    let text = "{\n";
+    bidders.forEach((bidder, bi) => {
+      text += `  "${bidder}": [\n`;
+      (partnerMap[bidder] || []).forEach((entry, ei) => {
+        const plain = entry
+          .replace(/<br\s*\/?>/gi, "\n    ")
+          .replace(/<[^>]+>/g, "")
+          .replace(/&nbsp;/g, " ")
+          .replace(/&amp;/g, "&");
+        text += `    ${plain.trim()}`;
+        text += ei < partnerMap[bidder].length - 1 ? ",\n" : "\n";
+      });
+      text += bi < bidders.length - 1 ? "  ],\n" : "  ]\n";
+    });
+    text += "}";
+
     container.innerHTML =
+      notice +
       "<pre style='font-size:12px;white-space:pre-wrap;'>" +
-      JSON.stringify(data.partnerParamsMap, null, 2) +
+      text +
       "</pre>";
   });
 }
